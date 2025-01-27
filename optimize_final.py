@@ -24,6 +24,8 @@ from PIL import Image
 import soft_renderer as sr
 from ChamferDistance.chamfer3D.dist_chamfer_3D import chamfer_3DDist
 
+from pytorch3d.loss import chamfer_distance
+
 from imageio import imread
 
 import copy
@@ -133,47 +135,54 @@ class CASA_Trainer():
         for ind, vertices in enumerate(wbx_results):
             sr.Mesh(vertices, faces_final).save_obj(os.path.join(temp_out_path, 'Frame{}.obj'.format(ind + 1)))
 
-    def calculate_loss(self,mesh1,epoch_id,iter_id,verts,offset_x,SO3_R,SE3_T,mask,flow,faces):
+    # def calculate_loss(self,mesh1,epoch_id,iter_id,verts,offset_x,SO3_R,SE3_T,mask,flow,faces):
+    def calculate_loss(self, epoch_id, iter_id, wbx, offset_x, SO3_R, SE3_T, pcd, flow, faces):
+        # (epoch_id, iter_id, wbx, offset_x, SO3_R, SE3_T, pcd, flow, faces)
 
         ### observation loss + regularization
 
-        ### mask loss
-        rendering_mask = self.renderer_soft.render_mesh(mesh1)
-        rendering_mask = rendering_mask[:, -1]
-        loss_mask = F.mse_loss(mask, rendering_mask)
-        if not epoch_id > 60:
-            loss = loss_mask * self.w_mask
-            if epoch_id % 10 == 1:
-                print("Loss for epoch {}, iter {} : mask: {:.2f}".format(epoch_id, iter_id, loss_mask.item() * self.w_mask))
+        # ### mask loss
+        # rendering_mask = self.renderer_soft.render_mesh(mesh1)
+        # rendering_mask = rendering_mask[:, -1]
+        # loss_mask = F.mse_loss(mask, rendering_mask)
+        # if not epoch_id > 60:
+        #     loss = loss_mask * self.w_mask
+        #     if epoch_id % 10 == 1:
+        #         print("Loss for epoch {}, iter {} : mask: {:.2f}".format(epoch_id, iter_id, loss_mask.item() * self.w_mask))
 
-            return loss
+        #     return loss
 
-        if epoch_id % 5 == 0:
-            mask_temp_path = os.path.join(self.out_path, 'Mask', "Epoch_{}".format(epoch_id))
-            os.makedirs(mask_temp_path,exist_ok=True)
-            for mask_ind in range(mask.shape[0]):
-                Image.fromarray((rendering_mask[mask_ind].detach().cpu().numpy() * 255).astype(np.uint8)).save(
-                    os.path.join(mask_temp_path, 'rendering_mask{}.jpg'.format(mask_ind)))
-                Image.fromarray((mask[mask_ind].detach().cpu().numpy() * 255).astype(np.uint8)).save(
-                    os.path.join(mask_temp_path, 'gt_mask{}.jpg'.format(mask_ind)))
+        # if epoch_id % 5 == 0:
+        #     mask_temp_path = os.path.join(self.out_path, 'Mask', "Epoch_{}".format(epoch_id))
+        #     os.makedirs(mask_temp_path,exist_ok=True)
+        #     for mask_ind in range(mask.shape[0]):
+        #         Image.fromarray((rendering_mask[mask_ind].detach().cpu().numpy() * 255).astype(np.uint8)).save(
+        #             os.path.join(mask_temp_path, 'rendering_mask{}.jpg'.format(mask_ind)))
+        #         Image.fromarray((mask[mask_ind].detach().cpu().numpy() * 255).astype(np.uint8)).save(
+        #             os.path.join(mask_temp_path, 'gt_mask{}.jpg'.format(mask_ind)))
+        
+        ### cd loss
+        loss_cd = chamfer_distance(wbx, pcd)[0]
+        breakpoint()
 
-        ### flow loss
-        mesh_flow = sr.Mesh(verts[:-1], faces.repeat(int(self.config.data.batch_size) - 1, 1, 1), textures=verts[1:],
-                            texture_type="vertex")
+        ### flow loss TODO: replace this with ndp predictions
+        # mesh_flow = sr.Mesh(verts[:-1], faces.repeat(int(self.config.data.batch_size) - 1, 1, 1), textures=verts[1:],
+        #                     texture_type="vertex")
 
-        rendering_uv = self.renderer_softtex.render_mesh(mesh_flow)
+        # rendering_uv = self.renderer_softtex.render_mesh(mesh_flow) 
 
-        rendering_grid = torch.Tensor(
-            np.meshgrid(range(rendering_mask.shape[2]), range(rendering_mask.shape[1]))).cuda()
-        rendering_grid[0] = rendering_grid[0] * 2 / (rendering_mask.shape[2]) - 1
-        rendering_grid[1] = 1 - rendering_grid[1] * 2 / (rendering_mask.shape[2])
-        rendering_grid = rendering_grid[None].repeat(rendering_uv.shape[0], 1, 1, 1)
-        rendering_flow = rendering_uv[:, :2] - rendering_grid
-        rendering_flow[:, 1] *= -1
-        flow_mask = (rendering_mask[:-1, None].clone().detach().bool() | mask[:-1, None].bool())
+        # rendering_grid = torch.Tensor(
+        #     np.meshgrid(range(rendering_mask.shape[2]), range(rendering_mask.shape[1]))).cuda()
+        # rendering_grid[0] = rendering_grid[0] * 2 / (rendering_mask.shape[2]) - 1
+        # rendering_grid[1] = 1 - rendering_grid[1] * 2 / (rendering_mask.shape[2])
+        # rendering_grid = rendering_grid[None].repeat(rendering_uv.shape[0], 1, 1, 1)
+        # rendering_flow = rendering_uv[:, :2] - rendering_grid
+        # rendering_flow[:, 1] *= -1
+        # flow_mask = (rendering_mask[:-1, None].clone().detach().bool() | mask[:-1, None].bool())
 
-        loss_flow = F.mse_loss(rendering_flow * flow_mask, flow[:-1] * flow_mask)
-
+        # loss_flow = F.mse_loss(rendering_flow * flow_mask, flow[:-1] * flow_mask)
+        loss_flow = F.mse_loss(wbx, flow)
+        breakpoint()
 
         ### smoothing loss
         gt_bone = torch.zeros((SO3_R.shape[0] - 1, SO3_R.shape[1], 4)).cuda()
@@ -190,34 +199,14 @@ class CASA_Trainer():
         x_reverse[:, 0] *= -1
         loss_chamfer = cham_loss(offset_x[None, :, :-1], x_reverse[None, :, :-1])[0].mean()
 
-        loss = loss_mask * self.w_mask + loss_flow * self.w_flow + \
-               (loss_bone + loss_bone3) * self.w_smooth + loss_chamfer * self.w_symm
+        loss = loss_flow * self.w_flow + (loss_bone + loss_bone3) * self.w_smooth + loss_chamfer * self.w_symm + loss_cd * self.mask
         ##################################################################
         if epoch_id % 10 == 1:
             print(
-                "Loss for epoch {}, iter {} : mask: {:.2f}, flow: {:.2f},  bone: {:.2f}, chamfer: {:.2f}".format(
-                    epoch_id, iter_id, loss_mask.item() * self.w_mask,
-                                       loss_flow.item() * self.w_flow, (loss_bone + loss_bone3) * self.w_smooth,
-                                       loss_chamfer * self.w_symm))
+                "Loss for epoch {}, iter {} : flow: {:.2f},  bone: {:.2f}, chamfer: {:.2f}".format(
+                    epoch_id, iter_id, loss_flow.item() * self.w_flow, (loss_bone + loss_bone3) * self.w_smooth, loss_chamfer * self.w_symm))
 
         return loss
-
-    def diff_render(self,wbx,intrin,extrin,faces):
-        ### perspective projection
-        ones_tensor = torch.ones_like(wbx[:, :, [0]])
-        wbx = torch.cat([wbx, ones_tensor], dim=2)
-        wbx0 = wbx[:, :, [0, 2, 1, 3]]
-        wbx0[:, :, 1] *= -1
-
-        verts = torch.matmul(intrin, torch.matmul(extrin, wbx0.permute(0, 2, 1))).permute(0, 2, 1)
-        depth_z = verts[:, :, [2]]
-        verts = verts / depth_z
-        verts = (verts - 512) / 512
-        verts[:, :, 1] *= -1
-
-        mesh1 = sr.Mesh(verts, faces.repeat(self.config.data.batch_size, 1, 1))
-
-        return verts,mesh1
 
     def basic_transform(self,basic_mesh,offset_net,zeros_tensor,mesh_scale,shifting):
         ### shape/skeleton offset
@@ -236,18 +225,17 @@ class CASA_Trainer():
 
         return x,ske_shift,offset_x
 
-
     def init_training(self):
 
         self.w_mask, self.w_flow, self.w_smooth, self.w_symm = int(self.config.model.w_mask), int(self.config.model.w_flow), \
                                            int(self.config.model.w_smooth), int(self.config.model.w_symm)
 
-        self.renderer_soft = sr.SoftRenderer(image_size=1024, sigma_val=1e-5,
-                                        camera_mode='look_at', perspective=False, aggr_func_rgb='hard',
-                                        light_mode='vertex', light_intensity_ambient=1., light_intensity_directionals=0.)
-        self.renderer_softtex = sr.SoftRenderer(image_size=1024, sigma_val=1e-4, gamma_val=1e-2,
-                                           camera_mode='look_at', perspective=False, aggr_func_rgb='softmax',
-                                           light_mode='vertex', light_intensity_ambient=1., light_intensity_directionals=0.)
+        # self.renderer_soft = sr.SoftRenderer(image_size=1024, sigma_val=1e-5,
+        #                                 camera_mode='look_at', perspective=False, aggr_func_rgb='hard',
+        #                                 light_mode='vertex', light_intensity_ambient=1., light_intensity_directionals=0.)
+        # self.renderer_softtex = sr.SoftRenderer(image_size=1024, sigma_val=1e-4, gamma_val=1e-2,
+        #                                    camera_mode='look_at', perspective=False, aggr_func_rgb='softmax',
+        #                                    light_mode='vertex', light_intensity_ambient=1., light_intensity_directionals=0.)
 
         ##### set frame length
         self.start_idx, self.end_idx = self.config.data.start_idx, self.config.data.end_idx
@@ -262,7 +250,7 @@ class CASA_Trainer():
 
         ### initialize with gt info
         W = torch.tensor(np.load(os.path.join(self.retrieve_mesh_dir, 'W1.npy')), requires_grad=True,
-                         device="cuda")  # Initialization with skinning weights of retrieval animal
+                         device="cuda")  # Initialization with skinning weights of retrieval animal NxB
         N, Frames, B = points_info.shape[0], self.end_idx - self.start_idx, W.shape[1]
 
         ### transformation initialization ###
@@ -289,6 +277,7 @@ class CASA_Trainer():
         shifting = torch.zeros((1, 3), requires_grad=True, device="cuda")
         mesh_scale = torch.ones((1), requires_grad=True, device="cuda")
 
+        # bone-wise rotation, root translation + rotation, canonical mesh, skinning weights, face, deform net, (why zerod?) for base mesh points, bone scale = 1, 
         return p1,p2,basic_mesh,W, faces, offset_net,zeros_tensor,bones_len_scale,shifting,mesh_scale
 
     def optimize(self,):
@@ -296,6 +285,9 @@ class CASA_Trainer():
         ### init training data
         p1,p2,basic_mesh,W, faces, offset_net,zeros_tensor,bones_len_scale,shifting,mesh_scale = self.init_training()
 
+        # assume all meshes are within 0 and 1
+        basic_mesh = (basic_mesh - basic_mesh.min(dim=0)) / (basic_mesh.max(dim=0) - basic_mesh.min(dim=0))
+        breakpoint()
         #####################################
 
 
@@ -331,15 +323,22 @@ class CASA_Trainer():
                 print("MESH SCALE: ", mesh_scale.clamp(0.15, 8).item())
 
             for iter_id, data in enumerate(train_loader):
-                intrin, extrin, mask, flow, index, color = data
-                intrin, extrin, mask, flow, color = intrin.cuda(), extrin.cuda(), mask.cuda(), flow.permute(0, 3, 1,
-                                                                                                            2).cuda(), color.cuda()
+                # intrin, extrin, mask, flow, index, color = data
+                pcd, flow, index = data # b,n,3; b,n,3; b
+                pcd, flow, index = pcd.cuda(), flow.cuda(), index.cuda()
+                # intrin, extrin, mask, flow, color = intrin.cuda(), extrin.cuda(), mask.cuda(), flow.permute(0, 3, 1,
+                                                                                                            # 2).cuda(), color.cuda()
 
                 if epoch_id == 0 and iter_id == 0:
                     with torch.no_grad():
-                        init_scale, shift = get_scale_init(basic_mesh, faces, intrin, extrin,
-                                                           mask, self.renderer_soft)
+                        # init_scale, shift = get_scale_init(basic_mesh, faces, intrin, extrin,
+                                                        #    mask, self.renderer_soft)
+                        mean_min = torch.mean(pcd.min(dim=1), dim=0)
+                        mean_max = torch.mean(pcd.max(dim=1), dim=0)
+                        len_pcd = torch.norm(mean_max - mean_min)
+                        init_scale = torch.norm(basic_mesh.max(dim=0) - basic_mesh.min(dim=0)) / len_pcd
                         mesh_scale *= init_scale
+                        breakpoint()
 
                 SO3_R = SO3.InitFromVec(p1)
                 SE3_T = SE3.InitFromVec(p2)
@@ -359,13 +358,16 @@ class CASA_Trainer():
                                            SE3_T[index[0]:index[-1] + 1], ske, json_data, mesh_scale,
                                            ske_shift.detach().cpu().numpy()
                                            )
+                breakpoint()
 
                 ### diff rendering
-                verts,mesh1 = self.diff_render(wbx,intrin,extrin,faces)
+                # verts,mesh1 = self.diff_render(wbx,intrin,extrin,faces)
 
                 ### calculate loss
-                loss = self.calculate_loss(mesh1, epoch_id, iter_id,  verts, offset_x,
-                               SO3_R, SE3_T, mask, flow,faces)
+                # loss = self.calculate_loss(mesh1, epoch_id, iter_id,  verts, offset_x,
+                #                SO3_R, SE3_T, mask, flow,faces)
+                
+                loss = self.calculate_loss(epoch_id, iter_id, wbx, offset_x, SO3_R, SE3_T, pcd, flow, faces)
 
                 sys.stdout.flush()
                 loss.backward()
@@ -394,3 +396,4 @@ if __name__ == '__main__':
     os.makedirs(os.path.join(self.out_path, 'temparray'), exist_ok=True)
 
     optimize(self.config, self.out_path)
+    

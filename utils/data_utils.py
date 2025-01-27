@@ -13,9 +13,12 @@ random.seed(seed)
 np.random.seed(seed)
 torch.manual_seed(seed)
 
+
 class Optimization_data(data.Dataset):
     def __init__(self, config):
         super().__init__()
+        
+        # TODO: implement this
         animal = config.data.test_animal
         start = config.data.start_idx
         end = config.data.end_idx
@@ -26,14 +29,19 @@ class Optimization_data(data.Dataset):
                            range(start, end)]
 
     def __getitem__(self, index):
-        intrin = torch.tensor(self.all_info_list[index]['intrinsic_mat']).float()
-        extrin = torch.tensor(self.all_info_list[index]['extrinsic_mat']).float()
-        mask = torch.tensor(self.all_info_list[index]['segmentation_masks'] / 255).float()
-        flow = torch.tensor(self.all_info_list[index]['optical_flow'] / 1024).float()
-        color = torch.tensor(self.color_imgs[index]).float() / 255.0
-        ret_ind = torch.tensor([index])
+        # we only need target pcd, flow and index
+        
+        flow = torch.from_numpy(self.flows[index])
 
-        return intrin, extrin, mask, flow, ret_ind, color
+    # def __getitem__(self, index):
+    #     intrin = torch.tensor(self.all_info_list[index]['intrinsic_mat']).float()
+    #     extrin = torch.tensor(self.all_info_list[index]['extrinsic_mat']).float()
+    #     mask = torch.tensor(self.all_info_list[index]['segmentation_masks'] / 255).float()
+    #     flow = torch.tensor(self.all_info_list[index]['optical_flow'] / 1024).float()
+    #     color = torch.tensor(self.color_imgs[index]).float() / 255.0
+    #     ret_ind = torch.tensor([index])
+
+    #     return intrin, extrin, mask, flow, ret_ind, color
 
     def __len__(self):
         return len(self.all_info_list)
